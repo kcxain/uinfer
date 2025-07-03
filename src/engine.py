@@ -11,6 +11,22 @@ from transformers import AutoTokenizer
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
+default_sampling_params = SamplingParams(
+    temperature=1.0,
+    top_p=1.0,
+    top_k=-1,
+    min_p=0.0,
+    max_tokens=8192,
+    stop=[
+        "</answer>",
+        "User:",
+        "Human:",
+        "Assistant:",
+        "<|im_end|>",
+        "<|endoftext|>",
+    ],
+)
+
 
 def extract_code(full_output: str) -> str:
     matches = re.findall(r"```python(.*?)```", full_output, re.DOTALL)
@@ -43,40 +59,17 @@ class VLLMInferenceEngine:
         self.processes = []
         self.tokenizer = AutoTokenizer.from_pretrained(self.pretrained_model)
 
-    def get_tokenizer(self):
+    def get_tokenizer(self) -> AutoTokenizer:
         return self.tokenizer
 
-    def worker_fn(
-        self,
-        gpu_ids,
-        task_queue,
-        result_queue,
-        max_model_len,
-        max_generation_token,
-        temp,
-    ):
+    def worker_fn(self, gpu_ids, task_queue, result_queue):
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpu_ids))
         llm = LLM(
             model=self.pretrained_model,
             dtype="bfloat16",
             tensor_parallel_size=len(gpu_ids),
             gpu_memory_utilization=0.85,
-            max_model_len=max_model_len,
-        )
-        sampling_params = SamplingParams(
-            temperature=temp,
-            top_p=1.0,
-            top_k=-1,
-            min_p=0.0,
-            max_tokens=max_generation_token,
-            stop=[
-                "</answer>",
-                "User:",
-                "Human:",
-                "Assistant:",
-                "<|im_end|>",
-                "<|endoftext|>",
-            ],
+            max_model_len=self.max_model_len,
         )
         while True:
             task = task_queue.get()
@@ -84,7 +77,7 @@ class VLLMInferenceEngine:
                 print("Stopping worker...")
                 break
             task_id, prompts = task
-            outputs = llm.generate(prompts, sampling_params)
+            outputs = llm.generate(prompts, self.sampling_params)
             result_texts = [out.outputs[0].text for out in outputs]
             result_queue.put((task_id, result_texts))
 
@@ -104,9 +97,6 @@ class VLLMInferenceEngine:
                     gpu_ids,
                     task_q,
                     result_q,
-                    self.max_model_len,
-                    self.max_generation_token,
-                    self.temp,
                 ),
             )
             p.start()
@@ -156,13 +146,11 @@ class VLLMInferenceEngine:
         prompts: List[str],
         sample_num: int = 1,
         parse_output: Callable = extract_code,
+        sampling_params: SamplingParams = default_sampling_params,
         max_model_len: int = 20000,
-        max_generation_token: int = 10000,
-        temp: float = 1.0,
     ) -> List[UinferOutput]:
+        self.sampling_params = sampling_params
         self.max_model_len = max_model_len
-        self.max_generation_token = max_generation_token
-        self.temp = temp
         # Start workers and tokenizer
         self.start_workers()
 
